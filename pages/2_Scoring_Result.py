@@ -1,0 +1,117 @@
+import streamlit as st
+import pandas as pd
+from modules.db import get_connection
+from modules.scoring import saw_score
+from modules import reporting
+
+st.header("📊 Scoring Tender (SAW Method)")
+
+# Logo upload / default logo management (auto-persist to session and save global if none exists)
+import os
+# Load global default into session if not already set
+if "logo_bytes" not in st.session_state and os.path.exists("assets/logo.png"):
+    with open("assets/logo.png", "rb") as f:
+        st.session_state["logo_bytes"] = f.read()
+
+logo_bytes = st.session_state.get("logo_bytes")
+
+col1, col2 = st.columns([1, 3])
+with col1:
+    uploaded_logo = st.file_uploader("Upload company logo (PNG/JPG)", type=["png", "jpg", "jpeg"], key="logo_scoring")
+    if uploaded_logo is not None:
+        logo_bytes = uploaded_logo.read()
+        st.session_state["logo_bytes"] = logo_bytes
+        st.image(logo_bytes, width=120)
+        # If no global default exists, save uploaded one automatically; otherwise allow replace
+        if not os.path.exists("assets/logo.png"):
+            os.makedirs("assets", exist_ok=True)
+            with open("assets/logo.png", "wb") as f:
+                f.write(logo_bytes)
+            st.success("Saved uploaded logo as global default: assets/logo.png")
+        else:
+            if st.button("Replace global default logo", key="replace_logo_scoring"):
+                with open("assets/logo.png", "wb") as f:
+                    f.write(logo_bytes)
+                st.success("Replaced global default logo: assets/logo.png")
+with col2:
+    if logo_bytes:
+        st.image(logo_bytes, width=120)
+    elif os.path.exists("assets/logo.png"):
+        with open("assets/logo.png", "rb") as f:
+            default_bytes = f.read()
+        st.image(default_bytes, width=120)
+        st.info("Using saved default logo (assets/logo.png)")
+
+# Company name for header (quick input stored in session)
+if "company_name" not in st.session_state:
+    st.session_state["company_name"] = ""
+st.text_input("Company name (header)", value=st.session_state["company_name"], key="company_name")
+
+
+# Bobot awal (bisa dikembangkan ke AHP)
+weights = {
+    "nilai_proyek": 0.4,
+    "durasi": 0.2,
+    "kompleksitas": 0.2,
+    "risiko": 0.2
+}
+
+conn = get_connection()
+df = pd.read_sql("SELECT * FROM tender", conn)
+conn.close()
+
+if df.empty:
+    st.warning("Belum ada data tender")
+else:
+    # Normalisasi sederhana
+    df["n_nilai"] = df["nilai_proyek"] / df["nilai_proyek"].max()
+    df["n_durasi"] = df["durasi"].min() / df["durasi"]
+    df["n_kompleksitas"] = df["kompleksitas"].min() / df["kompleksitas"]
+    df["n_risiko"] = df["risiko"].min() / df["risiko"]
+
+    df["score"] = df.apply(
+        lambda x: saw_score(
+            {
+                "nilai_proyek": x["n_nilai"],
+                "durasi": x["n_durasi"],
+                "kompleksitas": x["n_kompleksitas"],
+                "risiko": x["n_risiko"]
+            },
+            weights
+        ),
+        axis=1
+    )
+
+    st.subheader("📋 Hasil Scoring Tender")
+    df_export = df[[
+        "project_name",
+        "client",
+        "user",
+        "input_date",
+        "nomor_tender",
+        "nilai_proyek",
+        "durasi",
+        "kompleksitas",
+        "risiko",
+        "score"
+    ]].sort_values("score", ascending=False)
+
+    st.dataframe(df_export)
+
+    # Export buttons
+    csv_bytes = reporting.df_to_csv_bytes(df_export)
+    st.download_button("⬇️ Download CSV", data=csv_bytes, file_name="scoring_report.csv", mime="text/csv")
+
+    # PDF export: only enable if reportlab is available, otherwise show hint
+    try:
+        pdf_bytes = reporting.df_to_pdf_bytes(
+            df_export,
+            title="Scoring Report",
+            logo_bytes=logo_bytes,
+            company_name=st.session_state.get("company_name"),
+        )
+        st.download_button("📄 Download PDF", data=pdf_bytes, file_name="scoring_report.pdf", mime="application/pdf")
+    except RuntimeError as e:
+        st.warning("PDF export unavailable: " + str(e))
+        st.info("Install in the running environment: `pip install reportlab`")
+

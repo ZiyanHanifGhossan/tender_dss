@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.11, 3.12]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Verify optional dependencies
+        run: |
+          python -c "import plotly; print('plotly', plotly.__version__)"
+      - name: Initialize DB
+        run: python scripts/init_db.py
+      - name: Smoke test Streamlit
+        run: |
+          # Start Streamlit headlessly on port 8501 and verify the UI doesn't show the plotly warning
+          nohup python -m streamlit run app.py --server.port 8501 --server.headless true > streamlit.log 2>&1 &
+          STREAMLIT_PID=$!
+          echo "Started Streamlit PID $STREAMLIT_PID"
+
+          # Wait for server to accept connections
+          for i in {1..30}; do
+            if curl -sSf http://localhost:8501 >/dev/null 2>&1; then
+              echo "Streamlit up"
+              break
+            fi
+            sleep 1
+          done
+
+          # Fetch content and assert expected conditions
+          content=$(curl -s http://localhost:8501 || true)
+          echo "$content" | grep -qi "Optional dependency 'plotly' is not installed" && (echo "Plotly warning present" && exit 1) || echo "No plotly warning"
+          echo "$content" | grep -qi "plotly available" || (echo "Plotly info not found" && exit 1)
+
+          # Stop Streamlit
+          kill $STREAMLIT_PID || true
+        shell: bash
+      - name: Run tests
+        run: python -m pytest tests -q
